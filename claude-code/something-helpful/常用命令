@@ -1,0 +1,18 @@
+全局类
+/clear      重置上下文
+/resume     继续之前的工作
+
+会话类
+/init       创建CLAUDE.md
+/compact    对话压缩
+/rewind     时光倒流
+/btw        旁路问题
+/plan       先审查后执行
+
+设置类
+/model      切换模型
+/effort     控制推理深度
+
+状态类
+/context    理解上下文用量
+/cost       监控 Token 消耗
