@@ -1,0 +1,9 @@
+claudex() {
+  local dir="/home/heyushen/.claude/setup_env"
+  if [ "$1" ]; then
+    [ -f "$dir/$1.env" ] || return 1
+    (set -a; source "$dir/$1.env"; exec claude)
+  else
+    find "$dir" -maxdepth 1 -name '*.env' -exec basename {} .env \;
+  fi
+}
