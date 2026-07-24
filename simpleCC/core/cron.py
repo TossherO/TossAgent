@@ -105,8 +105,6 @@ def validate_cron(expression: str) -> str | None:
 
 
 def cron_matches(expression: str, moment: datetime) -> bool:
-    if validate_cron(expression):
-        return False
     minute, hour, day, month, weekday = expression.split()
     values = [moment.minute, moment.hour, moment.day, moment.month, (moment.weekday() + 1) % 7]
     if not _field_matches(minute, values[0], 0, 59) or not _field_matches(hour, values[1], 0, 23) or not _field_matches(month, values[3], 1, 12):

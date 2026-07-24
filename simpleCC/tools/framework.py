@@ -44,6 +44,19 @@ class ToolResult:
         return {"type": "tool_result", "tool_use_id": tool_use_id, "content": self.content, "is_error": self.is_error}
 
 
+READONLY_TOOLS: frozenset[str] = frozenset({"read_file", "glob", "list_skills", "load_skill", "read_memory"})
+
+_SENSITIVE_ARGS: frozenset[str] = frozenset({"content", "token", "password", "secret"})
+
+
+def format_tool_preview(call) -> str:
+    parts = []
+    for key, value in call.arguments.items():
+        if key in _SENSITIVE_ARGS:
+            value = "<redacted>"
+        parts.append(f"{key}={str(value).replace(chr(10), chr(92) + 'n')[:160]}")
+    return f"{call.name}({', '.join(parts)})"
+
 ToolHandler = Callable[[dict[str, Any], ToolContext], ToolResult]
 
 
@@ -88,15 +101,18 @@ class ToolDispatcher:
     def __init__(self, registry, before=None, after=None):
         self.registry, self.before, self.after = registry, before, after
 
+    def _safe_after(self, call, result, context):
+        if self.after:
+            try:
+                self.after(call, result, context)
+            except Exception:
+                pass
+
     def dispatch(self, call, context):
         registered = self.registry.get(call.name)
         if registered is None:
             result = ToolResult(f"Unknown tool: {call.name}", True, {"phase": "lookup"})
-            if self.after:
-                try:
-                    self.after(call, result, context)
-                except Exception:
-                    pass
+            self._safe_after(call, result, context)
             return result
         _, handler = registered
         if self.before:
@@ -106,11 +122,7 @@ class ToolDispatcher:
                 return ToolResult(f"Permission check failed: {type(exc).__name__}", True, {"blocked": True})
             if decision:
                 result = ToolResult(str(decision), True, {"blocked": True})
-                if self.after:
-                    try:
-                        self.after(call, result, context)
-                    except Exception:
-                        pass
+                self._safe_after(call, result, context)
                 return result
         started = time.perf_counter()
         try:
@@ -119,11 +131,7 @@ class ToolDispatcher:
                 result = ToolResult(str(result))
         except Exception as exc:
             result = ToolResult(f"Tool {call.name} failed: {type(exc).__name__}: {exc}", True)
-        result.metadata.setdefault("duration_ms", (time.perf_counter() - started) * 1000)
-        result.metadata.setdefault("output_chars", len(result.content))
-        if self.after:
-            try:
-                self.after(call, result, context)
-            except Exception:
-                pass
+        result.metadata["duration_ms"] = (time.perf_counter() - started) * 1000
+        result.metadata["output_chars"] = len(result.content)
+        self._safe_after(call, result, context)
         return result

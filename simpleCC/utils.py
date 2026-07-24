@@ -13,6 +13,13 @@ def safe_path(base: Path, value: str | Path) -> Path:
     return path
 
 
+def truncate_content(text: str, limit: int, label: str = "truncated") -> tuple[str, bool]:
+    truncated = len(text) > limit
+    if truncated:
+        text = text[:limit] + f"\n[{label}: limit={limit} chars]"
+    return text, truncated
+
+
 def atomic_write(path: Path, content: str, *, encoding: str = "utf-8") -> None:
     path = Path(path)
     tmp = path.with_suffix(".tmp")

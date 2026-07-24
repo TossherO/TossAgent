@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 from ..tools.framework import ToolResult, ToolSpec
+from ..utils import truncate_content
 from .stdio import StdioTransport
 from .http import StreamableHTTPTransport
 
@@ -61,9 +62,7 @@ def result_to_tool_result(result, max_chars=16000) -> ToolResult:
     if structured is not None:
         parts.append(json.dumps(structured, ensure_ascii=False))
     text = "\n".join(parts) or "(empty MCP result)"
-    truncated = len(text) > max_chars
-    if truncated:
-        text = text[:max_chars] + f"\n[MCP result truncated: limit={max_chars} chars]"
+    text, truncated = truncate_content(text, max_chars, "MCP result truncated")
     return ToolResult(text, is_error, {"truncated": truncated})
 
 

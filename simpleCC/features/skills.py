@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from ..tools.framework import ToolResult, ToolSpec
-from ..utils import safe_path
+from ..utils import safe_path, truncate_content
 
 
 class SkillStore:
@@ -48,8 +48,7 @@ class SkillStore:
             raise ValueError(f"Skill is too large: {name} ({size} bytes)")
         try:
             content = safe.read_text(encoding="utf-8")
-            if len(content) > self.output_limit_chars:
-                return content[:self.output_limit_chars] + f"\n[skill output truncated: limit={self.output_limit_chars} chars]"
+            content, _ = truncate_content(content, self.output_limit_chars, "skill output truncated")
             return content
         except UnicodeDecodeError as exc:
             raise ValueError(f"Skill is not valid UTF-8: {name}") from exc

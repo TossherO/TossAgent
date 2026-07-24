@@ -2,7 +2,7 @@ from typing import Any, Callable
 import fnmatch
 import subprocess
 
-from ..utils import safe_path
+from ..utils import safe_path, truncate_content
 from .framework import ToolSpec, ToolResult
 
 
@@ -22,9 +22,7 @@ def filesystem_tools(config=None) -> tuple[list[ToolSpec], dict[str, Callable]]:
         offset, limit = int(args.get("offset", 0)), args.get("limit")
         selected = lines[offset:] if limit is None else lines[offset:offset + int(limit)]
         content = "\n".join(selected)
-        truncated = len(content) > file_limit
-        if truncated:
-            content = content[:file_limit] + f"\n[file output truncated: limit={file_limit} chars]"
+        content, truncated = truncate_content(content, file_limit, "file output truncated")
         return ToolResult(content, metadata={"truncated": truncated})
 
     def write(args, ctx):
@@ -38,9 +36,7 @@ def filesystem_tools(config=None) -> tuple[list[ToolSpec], dict[str, Callable]]:
     def glob(args, ctx):
         matches = sorted(p.relative_to(ctx.workdir).as_posix() for p in ctx.workdir.rglob("*") if p.is_file() and fnmatch.fnmatch(p.relative_to(ctx.workdir).as_posix(), args["pattern"]))[:glob_matches_limit]
         content = "\n".join(matches)
-        truncated = len(content) > glob_limit
-        if truncated:
-            content = content[:glob_limit] + f"\n[glob output truncated: limit={glob_limit} chars]"
+        content, truncated = truncate_content(content, glob_limit, "glob output truncated")
         return ToolResult(content, metadata={"match_count": len(matches), "truncated": truncated})
 
     names = list(schemas.keys())
@@ -59,8 +55,7 @@ def shell_tools(config) -> tuple[list[ToolSpec], dict[str, Callable]]:
         except subprocess.TimeoutExpired as exc:
             return ToolResult(f"Command timed out after {timeout}s: {exc}", True)
         output = (completed.stdout or "") + (completed.stderr or "")
-        if len(output) > config.max_output_chars:
-            output = output[:config.max_output_chars] + f"\n[output truncated; limit={config.max_output_chars} characters]"
+        output, _truncated = truncate_content(output, config.max_output_chars, "output truncated")
         return ToolResult((f"exit_code={completed.returncode}\n" if completed.returncode else "") + (output or "(no output)"), bool(completed.returncode))
 
     return [spec], {"bash": handler}

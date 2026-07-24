@@ -3,6 +3,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .agent import response_content, extract_text
+
 
 @dataclass
 class CompactionConfig:
@@ -106,16 +108,12 @@ class ContextCompactor:
         prompt = "Summarize this coding-agent conversation. Preserve the original goal and constraints, completed work, findings, files, important tool results, unresolved work, and next steps. Return only a concise factual summary.\n\n" + source
         try:
             response = llm_client.create("You summarize agent context. Do not use tools.", [{"role": "user", "content": prompt}], [])
-            content = response.get("content", []) if isinstance(response, dict) else getattr(response, "content", [])
-            summary = "\n".join((b.get("text", "") if isinstance(b, dict) else getattr(b, "text", "")) for b in content if (b.get("type", "") if isinstance(b, dict) else getattr(b, "type", "")) == "text").strip()
+            summary = extract_text(response_content(response)).strip()
             if summary:
                 return [{"role": "user", "content": f"[Compacted conversation summary]\n\n{summary}"}]
         except Exception:
             pass
         return self.fallback_compact(messages, "Compacted conversation")
-
-    def reactive_compact(self, messages, llm_client):
-        return self.compact_history(messages, llm_client)
 
     def prepare(self, system, tools, messages, llm_client=None):
         self.tool_result_budget(messages)

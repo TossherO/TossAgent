@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ..tools.framework import ToolResult, ToolSpec
 from ..utils import safe_path, atomic_write
+from ..core.agent import extract_text, response_content
 
 
 class MemoryStore:
@@ -109,7 +110,7 @@ class MemoryStore:
         prompt = f"Select clearly relevant memory indices. Return only a JSON integer array, or [].\nRecent conversation:\n{recent_text}\nMemory catalog:\n{catalog}"
         try:
             response = llm.create("", [{"role": "user", "content": prompt}], [])
-            text = llm.extract_text(response).strip()
+            text = extract_text(response_content(response)).strip()
             match = re.search(r"\[[^\]]*\]", text)
             if match:
                 selected = []
@@ -148,7 +149,7 @@ class MemoryStore:
         prompt = "Extract only stable user preferences, explicit feedback, or project facts. Return only a JSON array of objects with name, type, description, body. type must be user, feedback, project, or reference. Return [] when nothing new is present or existing memories cover it.\nExisting memories:\n" + existing + "\nDialogue:\n" + "\n".join(dialogue)[:6000]
         try:
             response = llm.create("", [{"role": "user", "content": prompt}], [])
-            match = re.search(r"\[.*\]", llm.extract_text(response), re.DOTALL)
+            match = re.search(r"\[.*\]", extract_text(response_content(response)), re.DOTALL)
             if not match:
                 return 0
             count = 0
@@ -172,7 +173,7 @@ class MemoryStore:
         prompt = "Merge duplicate or stale memories. Preserve important stable preferences and project facts. Return only a JSON array of objects with name, type, description, body, with at most " + str(max_items) + " items. Do not invent facts.\n" + catalog
         try:
             response = llm.create("", [{"role": "user", "content": prompt}], [])
-            match = re.search(r"\[.*\]", llm.extract_text(response), re.DOTALL)
+            match = re.search(r"\[.*\]", extract_text(response_content(response)), re.DOTALL)
             if not match:
                 return 0
             items = json.loads(match.group())

@@ -2,13 +2,21 @@ from collections.abc import Callable
 from pathlib import Path
 import sys
 
-from ..tools.framework import ToolCall, ToolContext, ToolResult
+from ..tools.framework import ToolCall, ToolContext, ToolResult, READONLY_TOOLS, format_tool_preview
+from ..utils import safe_path
 
 
 USER_PROMPT_SUBMIT = "UserPromptSubmit"
 PRE_TOOL_USE = "PreToolUse"
 POST_TOOL_USE = "PostToolUse"
 STOP = "Stop"
+
+_EVENT_ALIASES: dict[str, str] = {
+    "before_tool": PRE_TOOL_USE,
+    "after_tool": POST_TOOL_USE,
+    "user_prompt_submit": USER_PROMPT_SUBMIT,
+    "stop": STOP,
+}
 
 
 class HookManager:
@@ -18,13 +26,9 @@ class HookManager:
     def register(self, event: str, callback: Callable) -> None:
         self._hooks.setdefault(self._normalize(event), []).append(callback)
 
-    def _normalize(self, event: str) -> str:
-        return {
-            "before_tool": PRE_TOOL_USE,
-            "after_tool": POST_TOOL_USE,
-            "user_prompt_submit": USER_PROMPT_SUBMIT,
-            "stop": STOP,
-        }.get(event, event)
+    @staticmethod
+    def _normalize(event: str) -> str:
+        return _EVENT_ALIASES.get(event, event)
 
     def emit(self, event: str, *args, isolate: bool = True):
         results = []
@@ -70,16 +74,6 @@ class AllowPrompter(PermissionPrompter):
         return True
 
 
-def _preview(call: ToolCall) -> str:
-    values = []
-    for key, value in call.arguments.items():
-        if key in {"content", "token", "password", "secret"}:
-            value = "<redacted>"
-        text = str(value).replace("\n", "\\n")
-        values.append(f"{key}={text[:160]}")
-    return f"Tool: {call.name}({', '.join(values)})"
-
-
 # ====== Permission strategy table ======
 
 class PermissionRule:
@@ -88,11 +82,9 @@ class PermissionRule:
 
 
 class ReadOnlyRule(PermissionRule):
-    ALLOWED = frozenset({"read_file", "glob", "list_skills", "load_skill", "read_memory"})
-
     def check(self, call, context, prompter, base):
         if context.agent_kind == "subagent" or context.read_only:
-            if call.name not in self.ALLOWED:
+            if call.name not in READONLY_TOOLS:
                 return "Tool denied for read-only subagent"
         return None
 
@@ -121,7 +113,7 @@ class ConfirmBashRule(PermissionRule):
         lowered = str(call.arguments.get("command", "")).lower()
         for pattern in self.patterns:
             if pattern in lowered:
-                if not prompter.confirm("Potentially destructive command", _preview(call)):
+                if not prompter.confirm("Potentially destructive command", format_tool_preview(call)):
                     return "Permission denied by user"
                 break
         return None
@@ -134,9 +126,10 @@ class ConfirmOutsideWorkspaceRule(PermissionRule):
     def check(self, call, context, prompter, base):
         if call.name not in self.tool_names:
             return None
-        path = (base / str(call.arguments.get("path", ""))).resolve()
-        if not path.is_relative_to(base):
-            if not prompter.confirm("Writing outside workspace", _preview(call)):
+        try:
+            safe_path(base, str(call.arguments.get("path", "")))
+        except ValueError:
+            if not prompter.confirm("Writing outside workspace", format_tool_preview(call)):
                 return "Permission denied by user"
         return None
 
@@ -157,7 +150,7 @@ def install_default_hooks(manager: HookManager, workdir: Path, prompter=None, pe
         if output:
             output(message)
 
-    def context_inject(query, _context):
+    def context_inject(query, _):
         emit(f"[prompt] working in {base}")
 
     def permission(call: ToolCall, context: ToolContext):
@@ -169,7 +162,7 @@ def install_default_hooks(manager: HookManager, workdir: Path, prompter=None, pe
         return None
 
     def log_hook(call: ToolCall, _context: ToolContext):
-        emit(f"[tool] { _preview(call) }")
+        emit(f"[tool] { format_tool_preview(call) }")
 
     def post_tool(call: ToolCall, result: ToolResult, _context: ToolContext):
         if result.is_error:

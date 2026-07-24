@@ -2,7 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from dataclasses import asdict
+from dataclasses import replace
 
 try:
     import readline
@@ -43,58 +43,66 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(_package_root))
     from simpleCC.config import AppConfig
     from simpleCC.runtime import Runtime
+    from simpleCC.tools.framework import format_tool_preview
 else:
     from .config import AppConfig
     from .runtime import Runtime
+    from .tools.framework import format_tool_preview
 
 
-def render_event(event):
-    event_type = event.get("type") if isinstance(event, dict) else event.type
+_thinking_active = False
+
+
+def _get(event, key, default=None):
+    return event.get(key, default) if isinstance(event, dict) else getattr(event, key, default)
+
+
+def _end_thinking():
+    global _thinking_active
+    if _thinking_active:
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+        _thinking_active = False
+
+
+def render_event(event, quiet=False):
+    global _thinking_active
+    event_type = _get(event, "type")
     if event_type == "text_delta":
-        text = event.get("text", "") if isinstance(event, dict) else event.text
+        _end_thinking()
+        text = _get(event, "text", "")
         sys.stdout.write(paint(text, "text"))
         sys.stdout.flush()
     elif event_type == "thinking_delta":
-        text = event.get("text", "") if isinstance(event, dict) else event.text
+        text = _get(event, "text", "")
         if text:
-            write_status(text, "thinking")
-    elif event_type == "status":
-        message = event.get("message", "") if isinstance(event, dict) else event.message
-        kind = "error" if message.startswith(("[permission]", "[warning]")) else "thinking" if message.startswith("[prompt]") else "status"
-        write_status(message, kind)
-    elif event_type == "tool_call":
-        call = event.get("tool_call") if isinstance(event, dict) else event.tool_call
-        args = []
-        for key, value in call.arguments.items():
-            if key in {"content", "token", "password", "secret"}:
-                value = "<redacted>"
-            args.append(f"{key}={str(value).replace(chr(10), chr(92) + 'n')[:160]}")
-        write_status(f"[tool] {call.name}({', '.join(args)})", "tool")
-    elif event_type == "llm_start":
-        metadata = event.get("metadata", {}) if isinstance(event, dict) else event.metadata
-        write_status(f"[llm] turn {metadata.get('turn', '?')}", "status")
-    elif event_type == "llm_fallback":
-        message = event.get("message", "") if isinstance(event, dict) else event.message
-        write_status(f"[llm] {message}", "thinking")
-    elif event_type == "session_start":
-        write_status("[session] started", "session")
-    elif event_type == "session_stop":
-        write_status("\n[session] stopped", "session")
-    elif event_type == "error":
-        message = event.get("message", "") if isinstance(event, dict) else event.message
-        write_status(f"[session] error: {message}", "error")
-
-
-def render_event_quiet(event):
-    event_type = event.get("type") if isinstance(event, dict) else event.type
-    if event_type == "text_delta":
-        text = event.get("text", "") if isinstance(event, dict) else event.text
-        sys.stdout.write(paint(text, "text"))
-        sys.stdout.flush()
-    elif event_type == "thinking_delta":
-        text = event.get("text", "") if isinstance(event, dict) else event.text
-        if text:
-            write_status(text, "thinking")
+            sys.stderr.write(paint(text, "thinking"))
+            sys.stderr.flush()
+            _thinking_active = True
+    elif quiet:
+        return
+    else:
+        _end_thinking()
+        if event_type == "status":
+            message = _get(event, "message", "")
+            kind = "error" if message.startswith(("[permission]", "[warning]")) else "thinking" if message.startswith("[prompt]") else "status"
+            write_status(message, kind)
+        elif event_type == "tool_call":
+            call = _get(event, "tool_call")
+            write_status(f"[tool] {format_tool_preview(call)}", "tool")
+        elif event_type == "llm_start":
+            metadata = _get(event, "metadata", {})
+            write_status(f"[llm] turn {metadata.get('turn', '?')}", "status")
+        elif event_type == "llm_fallback":
+            message = _get(event, "message", "")
+            write_status(f"[llm] {message}", "thinking")
+        elif event_type == "session_start":
+            write_status("[session] started", "session")
+        elif event_type == "session_stop":
+            write_status("\n[session] stopped", "session")
+        elif event_type == "error":
+            message = _get(event, "message", "")
+            write_status(f"[session] error: {message}", "error")
 
 
 def build_parser():
@@ -116,14 +124,14 @@ def main(argv=None):
     try:
         config = AppConfig.from_env(workdir)
         if args.permission_mode:
-            config = type(config)(**{**asdict(config), "permission_mode": args.permission_mode})
+            config = replace(config, permission_mode=args.permission_mode)
         elif args.query and config.permission_mode == "interactive":
-            config = type(config)(**{**asdict(config), "permission_mode": "deny"})
+            config = replace(config, permission_mode="deny")
         if args.no_stream:
-            config = type(config)(**{**asdict(config), "streaming": False})
+            config = replace(config, streaming=False)
         runtime = Runtime.create(config)
     except Exception as exc:
-        print(paint(f"启动失败: {type(exc).__name__}: {exc}", "error"), file=sys.stderr)
+        print(paint(f"Startup failed: {type(exc).__name__}: {exc}", "error"), file=sys.stderr)
         return 2
     if not args.quiet:
         write_status(f"simpleCC workspace: {runtime.config.workdir}", "status")
@@ -131,14 +139,14 @@ def main(argv=None):
     try:
         if args.query:
             try:
-                runtime.run(args.query, on_event=render_event if not args.quiet else render_event_quiet)
+                runtime.run(args.query, on_event=lambda e: render_event(e, quiet=args.quiet))
                 print()
                 return 0
             except KeyboardInterrupt:
-                print(paint("\n已取消当前请求", "error"), file=sys.stderr)
+                print(paint("\nCurrent request cancelled", "error"), file=sys.stderr)
                 return 130
             except Exception as exc:
-                write_status(f"运行失败: {type(exc).__name__}: {exc}", "error")
+                write_status(f"Run failed: {type(exc).__name__}: {exc}", "error")
                 return 1
         while True:
             try:
@@ -146,18 +154,18 @@ def main(argv=None):
             except EOFError:
                 break
             except KeyboardInterrupt:
-                print(paint("\n已取消当前输入", "error"), file=sys.stderr)
+                print(paint("\nCurrent input cancelled", "error"), file=sys.stderr)
                 continue
             if query.strip().lower() in {"exit", "quit"}:
                 break
             if query.strip():
                 try:
-                    runtime.run(query, on_event=render_event if not args.quiet else render_event_quiet)
+                    runtime.run(query, on_event=lambda e: render_event(e, quiet=args.quiet))
                     print()
                 except KeyboardInterrupt:
-                    print(paint("\n已取消当前请求", "error"), file=sys.stderr)
+                    print(paint("\nCurrent request cancelled", "error"), file=sys.stderr)
                 except Exception as exc:
-                    write_status(f"运行失败: {type(exc).__name__}: {exc}", "error")
+                    write_status(f"Run failed: {type(exc).__name__}: {exc}", "error")
     finally:
         runtime.close()
     return 0

@@ -7,7 +7,7 @@ from .core.agent import AgentLoop, LLMClient, PromptAssembler, extract_text
 from .core.compaction import CompactionConfig, ContextCompactor
 from .core.hooks import install_default_hooks, HookManager
 from .mcp import MCPManager
-from .tools import ToolDispatcher, ToolRegistry, ToolRegistryView, ToolContext, ToolResult, ToolSpec, filesystem_tools, shell_tools
+from .tools import ToolDispatcher, ToolRegistry, ToolRegistryView, ToolContext, ToolResult, ToolSpec, filesystem_tools, shell_tools, READONLY_TOOLS
 from .features.memory import MemoryStore, register_memory
 from .features.skills import SkillStore, register_skills
 from .features.tasks import TaskStore, register_tasks
@@ -33,7 +33,6 @@ class Runtime:
         self.tasks = TaskStore(config.tasks_dir)
         self.background_tasks = BackgroundTaskManager(config.tasks_dir / "background", config.workdir, config.output_dir, output_limit_chars=config.task_output_limit_chars)
         self.cron_lock = threading.RLock()
-        self.cron_agent_busy = False
         self.skills = SkillStore(config.skills_dir, config.skill_output_limit_chars)
         self.memory = MemoryStore(config.memory_dir / "MEMORY.md")
         self.memory_sessions = 0
@@ -47,17 +46,16 @@ class Runtime:
         self.compaction = ContextCompactor(CompactionConfig(context_limit=max(1024, min(config.context_limit, int(config.context_budget_tokens * config.estimated_chars_per_token))), max_messages=config.compaction_max_messages, keep_recent_tool_results=config.compaction_keep_recent_tools, tool_result_budget=config.compaction_tool_result_budget, persist_threshold=config.compaction_persist_threshold), config.output_dir, config.transcript_dir)
 
     def _register_builtin_tools(self):
-        for factory in (
-            lambda: filesystem_tools(self.config),
-            lambda: shell_tools(self.config),
-            lambda: register_tasks(self.tasks),
-            lambda: register_skills(self.skills),
-            lambda: register_todo(self.todos),
-            lambda: register_background_tools(self.background_tasks),
-            lambda: register_cron_tools(self.cron_scheduler),
-            lambda: register_memory(self.memory),
+        for specs, handlers in (
+            filesystem_tools(self.config),
+            shell_tools(self.config),
+            register_tasks(self.tasks),
+            register_skills(self.skills),
+            register_todo(self.todos),
+            register_background_tools(self.background_tasks),
+            register_cron_tools(self.cron_scheduler),
+            register_memory(self.memory),
         ):
-            specs, handlers = factory()
             for spec in specs:
                 self.registry.register(spec, handlers[spec.name])
         connect_spec = ToolSpec("connect_mcp", "Connect to a configured MCP server.", {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]})
@@ -75,8 +73,7 @@ class Runtime:
             return ToolResult("Nested subagents are not allowed", True, {"blocked": True})
         max_turns = max(1, min(int(args.get("max_turns", 8)), 20))
         agent_id = f"subagent-{uuid.uuid4().hex[:12]}"
-        allowed = {"read_file", "glob", "list_skills", "load_skill", "read_memory"}
-        registry = ToolRegistryView(self.registry, allowed)
+        registry = ToolRegistryView(self.registry, READONLY_TOOLS)
         context = ToolContext(self.config.workdir, agent_id, self, "subagent", parent_context.session_id, parent_context.depth + 1, True)
         query = f"Focused task:\n{task}\n\nAdditional context:\n{str(args.get('context', '')).strip() or '(none)'}\n\nReturn a concise final summary only."
         try:
@@ -110,7 +107,6 @@ class Runtime:
         if not self.cron_lock.acquire(blocking=False):
             return False
         try:
-            self.cron_agent_busy = True
             threading.Thread(target=self._run_cron_job, args=(job,), name="simplecc-cron-agent", daemon=True).start()
             return True
         finally:
@@ -121,9 +117,6 @@ class Runtime:
             self.run(f"[Scheduled] {job.prompt}")
         except Exception as exc:
             self._status(f"Scheduled job {job.id} failed: {type(exc).__name__}: {exc}")
-        finally:
-            with self.cron_lock:
-                self.cron_agent_busy = False
 
     def _status(self, message):
         if self.status_output:

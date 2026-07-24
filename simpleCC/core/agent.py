@@ -55,14 +55,6 @@ def tool_calls(response):
     return [b for b in response_content(response) if block_type(b) == "tool_use"]
 
 
-def estimate_size(messages):
-    return len(json.dumps(messages, ensure_ascii=False, default=str))
-
-
-def compact(messages, max_chars=100000):
-    return messages if estimate_size(messages) <= max_chars else [{"role": "user", "content": "[Earlier conversation compacted; recent context follows.]"}, *messages[-20:]]
-
-
 @dataclass
 class AgentEvent:
     type: str
@@ -120,7 +112,6 @@ class RecoveryController:
                 if on_retry:
                     on_retry(attempt + 1, exc, delay, consecutive_529)
                 self.sleep(delay)
-        raise last
 
 
 class LLMClient:
@@ -142,14 +133,18 @@ class LLMClient:
                 self.fallback_used = True
         return self.recovery.call(lambda: self._create(system, messages, tools, max_tokens), retry)
 
-    def stream(self, system, messages, tools, on_text=None, max_tokens=None):
+    def stream(self, system, messages, tools, on_text=None, on_thinking=None, max_tokens=None):
         emitted = []
 
-        def emit(text):
+        def emit_text(text):
             if text:
                 emitted.append(text)
                 if on_text:
                     on_text(text)
+
+        def emit_thinking(text):
+            if text and on_thinking:
+                on_thinking(text)
 
         def request():
             create = self.client.messages.create
@@ -166,11 +161,20 @@ class LLMClient:
                     delta_type = block_type(delta)
                     if delta_type == "text_delta":
                         text = block_value(delta, "text", "")
-                        emit(text)
+                        emit_text(text)
                         if current is None:
                             current = {"type": "text", "text": ""}
                             blocks.append(current)
                         current["text"] = current.get("text", "") + text
+                    elif delta_type == "thinking_delta":
+                        text = block_value(delta, "thinking", "")
+                        emit_thinking(text)
+                        if current is None:
+                            current = {"type": "thinking", "thinking": ""}
+                            blocks.append(current)
+                        current["thinking"] = current.get("thinking", "") + text
+                    elif delta_type == "signature_delta":
+                        current["signature"] = current.get("signature", "") + block_value(delta, "signature", "")
                     elif delta_type == "input_json_delta" and current is not None:
                         current["partial_json"] = current.get("partial_json", "") + block_value(delta, "partial_json", "")
                 elif event_type == "content_block_stop":
@@ -230,10 +234,9 @@ class AgentLoop:
                     if should_continue:
                         continue
                 calls = tool_calls(response)
-                if calls and emitted:
-                    self._emit(on_event, AgentEvent("thinking_delta", text=emitted))
                 if not calls:
-                    return self._handle_no_tool_calls(response, messages, context, should_extract, memory_snapshot, on_event)
+                    return self._handle_no_tool_calls(response, messages, context, should_extract, memory_snapshot, on_event, streamed=bool(emitted))
+                messages.append(response_message(response))
                 results, compact_requested = self._dispatch_tool_calls(calls, dispatcher, context, compactor, on_event)
                 if compact_requested:
                     messages = compactor.compact_history(messages, self.runtime.llm) if compactor else messages
@@ -270,7 +273,11 @@ class AgentLoop:
         while True:
             try:
                 if self.runtime.config.streaming:
-                    response, emitted, fallback = self.runtime.llm.stream(system_prompt, messages, registry.anthropic_tools(), max_tokens=max_tokens)
+                    response, emitted, fallback = self.runtime.llm.stream(
+                        system_prompt, messages, registry.anthropic_tools(),
+                        on_text=lambda text: self._emit(on_event, AgentEvent("text_delta", text=text)),
+                        on_thinking=lambda text: self._emit(on_event, AgentEvent("thinking_delta", text=text)),
+                        max_tokens=max_tokens)
                     if fallback:
                         self._emit(on_event, AgentEvent("llm_fallback", message="streaming unavailable; using non-streaming"))
                 else:
@@ -280,7 +287,7 @@ class AgentLoop:
             except Exception as exc:
                 markers = ("prompt_too_long", "too many tokens", "context length", "maximum context")
                 if compactor and reactive_retries < 1 and any(marker in str(exc).lower() for marker in markers):
-                    messages[:] = compactor.reactive_compact(messages, self.runtime.llm)
+                    messages[:] = compactor.compact_history(messages, self.runtime.llm)
                     reactive_retries += 1
                     self._emit(on_event, AgentEvent("llm_fallback", message="context too large; compacting and retrying"))
                     continue
@@ -295,9 +302,10 @@ class AgentLoop:
         messages.append({"role": "user", "content": "Output token limit hit. Resume directly — no apology, no recap. Pick up mid-thought."})
         return True, None, max_tokens, escalated, continuations + 1
 
-    def _handle_no_tool_calls(self, response, messages, context, should_extract, memory_snapshot, on_event):
+    def _handle_no_tool_calls(self, response, messages, context, should_extract, memory_snapshot, on_event, streamed=False):
         text = extract_text(response_content(response))
-        self._emit(on_event, AgentEvent("text_delta", text=text))
+        if not streamed:
+            self._emit(on_event, AgentEvent("text_delta", text=text))
         self.runtime.hooks.emit(STOP, messages, context)
         if context.agent_kind != "subagent" and should_extract:
             self._extract_and_consolidate(memory_snapshot)
